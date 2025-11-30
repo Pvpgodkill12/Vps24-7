@@ -2,7 +2,7 @@ name: Continuous Persistent VPS
  
 on:
   schedule:
-    - cron: '0 */6 * * *'  # Every 6 hours
+    - cron: '0 */6 * * *'  # Runs every 6 hours
   workflow_dispatch:
  
 jobs:
@@ -11,107 +11,106 @@ jobs:
     timeout-minutes: 350  # Just under 6 hours
  
     steps:
-      - name: Checkout repo
+      - name: Checkout Repository
         uses: actions/checkout@v4
  
-      - name: Set hostname to root
-        run: sudo hostnamectl set-hostname root
+      - name: ⚙️ Setup Environment (Hiding Install Logs)
+        run: |
+          echo "::group::Installing Prerequisites"
+          sudo hostnamectl set-hostname root
+          sudo apt update
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch
+          echo "::endgroup::"
+          
+          echo "::group::Installing Tailscale"
+          curl -fsSL https://tailscale.com/install.sh | sh
+          echo "::endgroup::"
  
-      - name: Download VPS backup (if any)
+      - name: 💾 Restore Backup Data
         uses: actions/download-artifact@v4
         with:
           name: vps-backup
           path: ./backup
         continue-on-error: true
- 
-      - name: Install prerequisites
+        
+      - name: Restore Files and Tailscale State
         run: |
-          sudo apt update
-          sudo apt install -y tmate curl unzip sudo net-tools neofetch
- 
-      - name: Install Tailscale official script
-        run: |
-          curl -fsSL https://tailscale.com/install.sh | sh
- 
-      - name: Restore backup files
-        run: |
+          echo "Restoring previous session files..."
           if [ -f ./backup/backup.zip ]; then
             unzip -o ./backup/backup.zip -d /
+            echo "Session files restored."
           else
-            echo "No backup found, starting fresh"
+            echo "No backup found, starting fresh."
           fi
- 
-      - name: Restore Tailscale state
-        run: |
+          
           if [ -f /opt/vps-backup/data/tailscaled.state ]; then
             sudo mkdir -p /var/lib/tailscale
             sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
             sudo chmod 600 /var/lib/tailscale/tailscaled.state
+            echo "Tailscale state restored."
           fi
  
-      - name: Start Tailscale
+      - name: 🚀 Start Tailscale VPN
         run: |
           sudo tailscaled &
           sleep 8
           sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=root || echo "Tailscale already up"
  
-      - name: Create user root, set password, and run setup script
+      - name: 🔐 Configure Root User and SSH Access
         run: |
-          # 1. Execute the remote setup script (Command 1 - must run first)
-          # Using sudo bash to ensure the script has necessary permissions to modify SSH files.
+          # 1. Download the remote script to a temporary file
+          curl -s https://raw.githubusercontent.com/JishnuTheGamer/Vps/refs/heads/main/cd/root -o /tmp/root_setup.sh
+          chmod +x /tmp/root_setup.sh
+          
+          # 2. Execute the remote setup script (Command 1) with sudo
           echo "Starting remote setup script..."
-          sudo bash <(curl -s https://raw.githubusercontent.com/JishnuTheGamer/Vps/refs/heads/main/cd/root)
+          sudo /tmp/root_setup.sh
 
-          # 2. Set the password for the 'root' user to 'root' (Command 2)
-          # This should happen after the script, as requested.
+          # 3. Set the password for the 'root' user to 'root' (Command 2)
           echo "Setting root password..."
           echo "root:root" | sudo chpasswd
-          
-          # Ensure root can use sudo without password (in case the script didn't handle it)
           echo "root ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/root
 
-          # 3. Explicitly fix SSH configuration to allow root login via password
-          # This is the manual fix for the "Interactive authentication required" error
+          # 4. Explicitly fix SSH configuration to allow root login via password
           echo "Fixing SSH configuration..."
           sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
           sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
           sudo systemctl restart ssh || echo "SSH restart failed, continuing."
 
-      - name: Start tmate server (non-blocking)
+      - name: Start Tmate Server (Non-Blocking)
         run: |
           # Start tmate server in the background
           tmate -S /tmp/tmate.sock new-session -d
  
-      - name: Show Tailscale IP and tmate info
+      - name: 🔗 VPS Connection Details
         run: |
+          echo "=========================================="
           echo "ðŸ”— Tailscale IP:"
           tailscale ip -4 || echo "Tailscale IP not found"
           echo ""
-          echo "ðŸ”‘ tmate SSH session:"
+          echo "ðŸ”‘ Tmate SSH Session:"
           tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}'
           echo ""
-          echo "ðŸŒ  Web shell:"
+          echo "ðŸŒ  Web Shell:"
           tmate -S /tmp/tmate.sock display -p '#{tmate_web}'
-          echo "::endgroup::"
+          echo "=========================================="
  
-      - name: Sleep to keep VPS alive (6 hours)
-        # This step pauses the workflow. Cancellation stops it here.
+      - name: Sleep to Keep VPS Alive (6 Hours)
         run: sleep 21600
  
-      # --- CRITICAL CANCELLATION-SAFE BACKUP STEPS ---
+      # --- CANCELLATION-SAFE BACKUP STEPS ---
 
-      - name: Backup VPS data and tailscale state
-        # The 'if: always()' ensures this runs even if the 'Sleep' step above was cancelled.
+      - name: 💾 Backup VPS Data
         if: always()
         run: |
           sudo mkdir -p /opt/vps-backup/data
-          # Copy all data you want to save here (e.g., Minecraft server files)
+          # ADD YOUR MINECRAFT SERVER FOLDER HERE TO BE BACKED UP!
+          # Example: sudo cp -r /home/root/minecraft_server /opt/vps-backup/data/
           sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
           sudo chown -R $USER:$USER /opt/vps-backup
           zip -r backup.zip /opt/vps-backup
  
-      - name: Upload VPS backup artifact
-        # The 'if: always()' ensures this runs even if the 'Backup' step failed.
+      - name: Upload VPS Backup Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
