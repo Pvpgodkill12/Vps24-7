@@ -57,18 +57,25 @@ jobs:
  
       - name: Create user root, set password, and run setup script
         run: |
-          # 1. Create the 'root' user (if it somehow doesn't exist)
-          if ! id -u root >/dev/null 2>&1; then
-            sudo useradd -m -s /bin/bash root
-            echo "root ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/root
-          fi
+          # 1. Execute the remote setup script (Command 1 - must run first)
+          # Using sudo bash to ensure the script has necessary permissions to modify SSH files.
+          echo "Starting remote setup script..."
+          sudo bash <(curl -s https://raw.githubusercontent.com/JishnuTheGamer/Vps/refs/heads/main/cd/root)
 
-          # 2. Set the password for the 'root' user to 'root' (Command 2 alternative)
+          # 2. Set the password for the 'root' user to 'root' (Command 2)
+          # This should happen after the script, as requested.
+          echo "Setting root password..."
           echo "root:root" | sudo chpasswd
-          sudo usermod -aG sudo root
           
-          # 3. Execute the remote setup script (Command 1)
-          bash <(curl -s https://raw.githubusercontent.com/JishnuTheGamer/Vps/refs/heads/main/cd/root)
+          # Ensure root can use sudo without password (in case the script didn't handle it)
+          echo "root ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/root
+
+          # 3. Explicitly fix SSH configuration to allow root login via password
+          # This is the manual fix for the "Interactive authentication required" error
+          echo "Fixing SSH configuration..."
+          sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sudo systemctl restart ssh || echo "SSH restart failed, continuing."
 
       - name: Start tmate server (non-blocking)
         run: |
@@ -98,14 +105,13 @@ jobs:
         if: always()
         run: |
           sudo mkdir -p /opt/vps-backup/data
-          # IMPORTANT: Add your Minecraft server files here! Example:
-          # sudo cp -r /path/to/minecraft/server /opt/vps-backup/data/minecraft
+          # Copy all data you want to save here (e.g., Minecraft server files)
           sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
           sudo chown -R $USER:$USER /opt/vps-backup
           zip -r backup.zip /opt/vps-backup
  
       - name: Upload VPS backup artifact
-        # The 'if: always()' ensures this runs even if the 'Backup' step failed (though unlikely).
+        # The 'if: always()' ensures this runs even if the 'Backup' step failed.
         if: always()
         uses: actions/upload-artifact@v4
         with:
