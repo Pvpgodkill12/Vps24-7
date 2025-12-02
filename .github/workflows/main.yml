@@ -16,18 +16,16 @@ jobs:
         with:
           token: ${{ secrets.GH_TOKEN }} 
           
-      - name: ⚙️ Install Core System Prerequisites
+      - name: ⚙️ Install Core System Prerequisites (Including MariaDB Server)
         run: |
           sudo hostnamectl set-hostname root
           sudo apt update
-          # Ensure MariaDB Server is installed for Pterodactyl/Backup
           sudo apt install -y tmate curl unzip sudo net-tools neofetch git mariadb-server
  
       - name: 💾 Retrieve Previous Backup from 'backup' Branch
         run: |
           echo "::group::Retrieving backup from Git branch"
           BACKUP_REPO_DIR=./backup/repo
-          # Use GH_TOKEN for authentication
           git clone --single-branch --branch backup https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR} 2>/dev/null || \
           git clone https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR}
           
@@ -49,7 +47,7 @@ jobs:
             unzip -o ./backup/backup.zip -d /
             echo "Session files restored."
             
-            # --- Restoration Checks for Pterodactyl/Root ---
+            # Restoration Checks
             if [ -d /opt/vps-backup/data/root_home ]; then
                 sudo cp -a /opt/vps-backup/data/root_home/. /root/
             fi
@@ -63,7 +61,7 @@ jobs:
             echo "No backup found, starting fresh."
           fi
           
-          # Restore Tailscale state (Helps Tailscale identify itself faster)
+          # Restore Tailscale state 
           if [ -f /opt/vps-backup/data/tailscaled.state ]; then
             sudo mkdir -p /var/lib/tailscale
             sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
@@ -71,7 +69,7 @@ jobs:
             echo "Tailscale state restored."
           fi
  
-      # --- FIX: Networking tools split into separate steps for crash resistance ---
+      # --- Networking tools split into separate, stable steps ---
       
       - name: 🔐 Install Tailscale
         run: curl -fsSL https://tailscale.com/install.sh | sh
@@ -81,11 +79,17 @@ jobs:
           curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
           sudo install cloudflared /usr/local/bin/cloudflared
           
-      - name: 🎮 Install Playit.gg Agent
+      - name: 🎮 Install Playit.gg Agent (PPA Method for Stability)
         run: |
-          curl -sSL https://playit-cloud.github.io/ppa/install.sh | sudo bash
-          sudo apt install playit -y
-
+          echo "Setting up Playit.gg PPA..."
+          # 1. Download and trust the GPG key
+          curl -SsL https://playit-cloud.github.io/ppa/key.gpg | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/playit.gpg >/dev/null
+          # 2. Add the Playit APT repository source
+          echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] https://playit-cloud.github.io/ppa/data ./" | sudo tee /etc/apt/sources.list.d/playit-cloud.list
+          # 3. Update APT and install the package
+          sudo apt update
+          sudo apt install -y playit
+          
       # --- End of Installation Steps ---
 
       - name: 🚀 Start Networking Services & Database
@@ -155,12 +159,11 @@ jobs:
           echo "Attempting to dump Pterodactyl database..."
           sudo systemctl start mariadb 2>/dev/null || true
           
-          # Attempt dump (non-critical if DB is not set up)
+          # Attempt dump (non-critical if DB is not set up, using 2>/dev/null to silence errors)
           sudo mysqldump -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel > /opt/vps-backup/data/pterodactyl_db.sql 2>/dev/null || echo "DB DUMP FAILED (Expected if database is not fully set up). Continuing."
 
           echo "Copying Pterodactyl files (if present)..."
           sudo mkdir -p /opt/vps-backup/data/pterodactyl_panel
-          # Using check for existence to prevent crash on fresh start
           if [ -d /var/www/pterodactyl ]; then
             sudo cp -a /var/www/pterodactyl/. /opt/vps-backup/data/pterodactyl_panel/
           else
@@ -178,8 +181,10 @@ jobs:
           echo "Copying /root directory contents..."
           sudo cp -a /root/. /opt/vps-backup/data/root_home/
           
+          # Backup Tailscale state
           sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
           
+          # Cleanup cache/temporary files before zipping
           sudo rm -rf /opt/vps-backup/data/root_home/.cache /opt/vps-backup/data/root_home/.tmate.sock /opt/vps-backup/data/root_home/.bash_history
           sudo chown -R $USER:$USER /opt/vps-backup
           zip -r backup.zip /opt/vps-backup
