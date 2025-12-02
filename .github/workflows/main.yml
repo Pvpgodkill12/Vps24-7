@@ -21,7 +21,8 @@ jobs:
           echo "::group::Installing Prerequisites"
           sudo hostnamectl set-hostname root
           sudo apt update
-          sudo apt install -y tmate curl unzip sudo net-tools neofetch git mariadb-client 
+          # FIX: ADDED mariadb-server
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch git mariadb-server
           echo "::endgroup::"
           
           echo "::group::Installing Tailscale, Cloudflared, and Playit.gg"
@@ -36,6 +37,7 @@ jobs:
         run: |
           echo "::group::Retrieving backup from Git branch"
           BACKUP_REPO_DIR=./backup/repo
+          # Use GH_TOKEN for authentication
           git clone --single-branch --branch backup https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR} 2>/dev/null || \
           git clone https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR}
           
@@ -83,7 +85,7 @@ jobs:
  
       - name: 🚀 Start Networking Services & Database
         run: |
-          # Start Database
+          # Start Database (Now guaranteed to be installed)
           sudo systemctl start mariadb || sudo systemctl start mysql || echo "Database service start failed."
 
           # Restore Pterodactyl Database
@@ -92,10 +94,10 @@ jobs:
               sudo mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel < /opt/vps-backup/data/pterodactyl_db.sql || echo "Database restore failed. Check DB password secret."
           fi
           
-          # Start Tailscale with the final fix!
+          # Start Tailscale with the final fix for stable naming!
           sudo tailscaled &
           sleep 8
-          # --- THE FINAL FIX: ADDING --reset ---
+          # FIX: ADDED --reset for persistent 'root' name
           sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=root --reset || echo "Tailscale already up/error"
           
           # Start Cloudflare Tunnel (Token is sanitized)
@@ -127,13 +129,13 @@ jobs:
       - name: 🔗 VPS Connection Details (Ultimate Access)
         run: |
           echo "=========================================="
-          echo "ðŸŒ  STATIC PTERODACTYL/WEB ACCESS (Cloudflare Tunnel)"
+          echo "🌐 STATIC PTERODACTYL/WEB ACCESS (Cloudflare Tunnel)"
           echo "  ---> panel.pvgo.qzz.io (or your custom domain) <---"
-          echo "ðŸŽ® STATIC MINECRAFT/GAMING ACCESS (Playit.gg)"
+          echo "🎮 STATIC MINECRAFT/GAMING ACCESS (Playit.gg)"
           echo "  ---> Check your Playit.gg dashboard for the public IP/Domain <---"
           echo "------------------------------------------"
-          echo "ðŸ”‘ Tailscale MagicDNS Name (Should now be stable): root"
-          echo "ðŸ”— Tailscale IP (Internal VPN):"
+          echo "🔑 Tailscale MagicDNS Name (Should now be stable): root"
+          echo "🔎 Tailscale IP (Internal VPN):"
           tailscale ip -4 || echo "Tailscale IP not found"
           echo "=========================================="
  
@@ -146,16 +148,29 @@ jobs:
         run: |
           sudo mkdir -p /opt/vps-backup/data/root_home
           
-          echo "Dumping Pterodactyl database..."
-          sudo mysqldump -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel > /opt/vps-backup/data/pterodactyl_db.sql || echo "DB DUMP FAILED. Check DB password secret."
+          echo "Attempting to dump Pterodactyl database..."
+          # Start the service just in case (and silence stderr)
+          sudo systemctl start mariadb 2>/dev/null || true
+          
+          # Attempt dump (non-critical if DB is not set up)
+          sudo mysqldump -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel > /opt/vps-backup/data/pterodactyl_db.sql 2>/dev/null || echo "DB DUMP FAILED (Expected if database is not fully set up). Continuing."
 
-          echo "Copying Pterodactyl files..."
+          echo "Copying Pterodactyl files (if present)..."
           sudo mkdir -p /opt/vps-backup/data/pterodactyl_panel
-          sudo cp -a /var/www/pterodactyl/. /opt/vps-backup/data/pterodactyl_panel/
-
-          echo "Copying Pterodactyl Wings/Server data..."
+          # FIX: Check if directories exist before attempting to copy
+          if [ -d /var/www/pterodactyl ]; then
+            sudo cp -a /var/www/pterodactyl/. /opt/vps-backup/data/pterodactyl_panel/
+          else
+            echo "/var/www/pterodactyl not found. Skipping panel file backup."
+          fi
+          
+          echo "Copying Pterodactyl Wings/Server data (if present)..."
           sudo mkdir -p /opt/vps-backup/data/pterodactyl_wings
-          sudo cp -a /var/lib/pterodactyl/. /opt/vps-backup/data/pterodactyl_wings/
+          if [ -d /var/lib/pterodactyl ]; then
+            sudo cp -a /var/lib/pterodactyl/. /opt/vps-backup/data/pterodactyl_wings/
+          else
+            echo "/var/lib/pterodactyl not found. Skipping wings data backup."
+          fi
 
           echo "Copying /root directory contents..."
           sudo cp -a /root/. /opt/vps-backup/data/root_home/
