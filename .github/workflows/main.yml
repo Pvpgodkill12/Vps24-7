@@ -78,18 +78,7 @@ jobs:
         run: |
           curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
           sudo install cloudflared /usr/local/bin/cloudflared
-          
-      - name: 🎮 Install Playit.gg Agent (PPA Method for Stability)
-        run: |
-          echo "Setting up Playit.gg PPA..."
-          # 1. Download and trust the GPG key
-          curl -SsL https://playit-cloud.github.io/ppa/key.gpg | gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/playit.gpg >/dev/null
-          # 2. Add the Playit APT repository source
-          echo "deb [signed-by=/etc/apt/trusted.gpg.d/playit.gpg] https://playit-cloud.github.io/ppa/data ./" | sudo tee /etc/apt/sources.list.d/playit-cloud.list
-          # 3. Update APT and install the package
-          sudo apt update
-          sudo apt install -y playit
-          
+         
       # --- End of Installation Steps ---
 
       - name: 🚀 Start Networking Services & Database
@@ -97,10 +86,7 @@ jobs:
           # Start Database
           sudo systemctl start mariadb || sudo systemctl start mysql || echo "Database service start failed."
 
-          # Restore Pterodactyl Database
-          if [ -f /opt/vps-backup/data/pterodactyl_db.sql ]; then
-              echo "Re-importing Pterodactyl database..."
-              sudo mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel < /opt/vps-backup/data/pterodactyl_db.sql || echo "Database restore failed. Check DB password secret."
+          # Restore Pterodactyl ot -p${{ secrets.DB_ROOT_PASSWORD }} panel < /opt/vps-backup/data/pterodactyl_db.sql || echo "Database restore failed. Check DB password secret."
           fi
           
           # Start Tailscale with the --reset fix for persistent 'root' name
@@ -113,10 +99,6 @@ jobs:
           sudo /usr/local/bin/cloudflared tunnel run --token "$CLEAN_TOKEN" &
           echo "Cloudflare Tunnel started."
 
-          # Start Playit.gg for Static Minecraft Access
-          echo "Starting Playit.gg daemon..."
-          playit --secret ${{ secrets.PLAYIT_SECRET_KEY }} & 
-          
           sleep 5 
 
       - name: 🔐 Configure Root User and SSH Access
