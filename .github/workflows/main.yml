@@ -20,15 +20,13 @@ jobs:
         run: |
           echo "::group::Installing Prerequisites"
           sudo hostnamectl set-hostname root
+          # Install MariaDB/MySQL client if needed for database restoration
           sudo apt update
-          # Ensure 'git' is installed here for the backup steps
-          sudo apt install -y tmate curl unzip sudo net-tools neofetch git
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch git mariadb-client 
           echo "::endgroup::"
           
           echo "::group::Installing Tailscale and Cloudflared"
-          # Install Tailscale
           curl -fsSL https://tailscale.com/install.sh | sh
-          # Install cloudflared
           curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
           sudo install cloudflared /usr/local/bin/cloudflared
           echo "::endgroup::"
@@ -37,8 +35,6 @@ jobs:
         run: |
           echo "::group::Retrieving backup from Git branch"
           BACKUP_REPO_DIR=./backup/repo
-          
-          # Clone the 'backup' branch or create it if it doesn't exist
           git clone --single-branch --branch backup https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR} 2>/dev/null || \
           git clone https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR}
           
@@ -53,18 +49,33 @@ jobs:
           rm -rf ${BACKUP_REPO_DIR}
           echo "::endgroup::"
           
-      - name: Restore Files and Tailscale State (Includes /root)
+      - name: Restore Files and Tailscale State (Pterodactyl & Root)
         run: |
           echo "Restoring previous session files..."
           if [ -f ./backup/backup.zip ]; then
             unzip -o ./backup/backup.zip -d /
             echo "Session files restored."
             
-            # Restore /root contents
+            # Restore /root contents (Minecraft files, custom scripts)
             if [ -d /opt/vps-backup/data/root_home ]; then
-                echo "Restoring /root directory contents..."
+                echo "Restoring /root directory contents (MC, Custom Files)..."
                 sudo cp -a /opt/vps-backup/data/root_home/. /root/
-                sudo rm -rf /opt/vps-backup/data/root_home
+            fi
+
+            # --- NEW LOGIC: Restore Pterodactyl Panel/Wings files ---
+            if [ -d /opt/vps-backup/data/pterodactyl_panel ]; then
+                echo "Restoring Pterodactyl Panel files..."
+                sudo cp -a /opt/vps-backup/data/pterodactyl_panel/. /var/www/pterodactyl/
+            fi
+            if [ -d /opt/vps-backup/data/pterodactyl_wings ]; then
+                echo "Restoring Pterodactyl Wings data..."
+                sudo cp -a /opt/vps-backup/data/pterodactyl_wings/. /var/lib/pterodactyl/
+            fi
+            
+            # --- NEW LOGIC: Restore Database ---
+            if [ -f /opt/vps-backup/data/pterodactyl_db.sql ]; then
+                echo "Restoring Pterodactyl database..."
+                # NOTE: This requires MariaDB/MySQL to be running later.
             fi
             
           else
@@ -79,23 +90,29 @@ jobs:
             echo "Tailscale state restored."
           fi
  
-      - name: 🚀 Start Networking Services (Cloudflare Token Sanitized)
+      - name: 🚀 Start Networking Services & Database
         run: |
+          # Start Database (Mandatory for Pterodactyl)
+          sudo systemctl start mariadb || sudo systemctl start mysql || echo "Database service start failed, check installation."
+
+          # Restore Pterodactyl Database (Must happen after the service starts)
+          if [ -f /opt/vps-backup/data/pterodactyl_db.sql ]; then
+              echo "Re-importing Pterodactyl database..."
+              # WARNING: This assumes your DB root password is in the secret.
+              sudo mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel < /opt/vps-backup/data/pterodactyl_db.sql || echo "Database restore failed. Check DB password secret."
+          fi
+          
           # Start Tailscale
           sudo tailscaled &
           sleep 8
           sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=root || echo "Tailscale already up"
           
-          # --- CLOUDFLARE FIX: SANITIZE TOKEN ---
-          echo "Cleaning the Cloudflare token to remove hidden characters..."
-          # The tr command strips out any non-printable characters.
+          # Start Cloudflare Tunnel (Token is sanitized)
           CLEAN_TOKEN=$(echo "${{ secrets.CF_TUNNEL_TOKEN }}" | tr -cd '[:print:]')
-          
-          # Start Cloudflare Tunnel (This runs in the background)
           sudo /usr/local/bin/cloudflared tunnel run --token "$CLEAN_TOKEN" &
-          echo "Cloudflare Tunnel started, providing static domain access."
-          sleep 5 # Wait for tunnel to establish
- 
+          echo "Cloudflare Tunnel started."
+          sleep 5
+
       - name: 🔐 Configure Root User and SSH Access
         run: |
           # 1. Execute remote script
@@ -109,7 +126,7 @@ jobs:
           echo "root:root" | sudo chpasswd
           echo "root ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/root
 
-          # 3. Explicitly fix SSH configuration
+          # 3. Explicitly fix SSH configuration and restart
           echo "Fixing SSH configuration..."
           sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
           sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
@@ -119,12 +136,10 @@ jobs:
         run: |
           tmate -S /tmp/tmate.sock new-session -d
  
-      - name: 🔗 VPS Connection Details (Static Access via Cloudflare)
+      - name: 🔗 VPS Connection Details (Static Access)
         run: |
           echo "=========================================="
-          echo "ðŸŒ  STATIC PUBLIC DOMAIN ACCESS (Cloudflare Tunnel):"
-          echo "  (The IP you use for Pterodactyl, Minecraft, and SSH)"
-          echo "  ---> Check your Cloudflare DNS setup for the domain <---"
+          echo "ðŸŒ  STATIC PUBLIC DOMAIN ACCESS (Cloudflare Tunnel is ACTIVE)"
           echo "------------------------------------------"
           echo "ðŸ”— Tailscale IP (Internal VPN):"
           tailscale ip -4 || echo "Tailscale IP not found"
@@ -138,23 +153,35 @@ jobs:
  
       # --- CANCELLATION-SAFE BACKUP STEPS ---
 
-      - name: 💾 Create Backup Archive
+      - name: 💾 Create Backup Archive (Pterodactyl & Root Data)
         if: always()
         run: |
           sudo mkdir -p /opt/vps-backup/data/root_home
           
-          # 1. Copy Tailscale state
-          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
-          
-          # 2. Copy the entire /root directory contents (for MC, custom files, etc.)
-          echo "Copying /root directory contents for backup..."
+          # 1. Database Backup (MOST CRITICAL for Pterodactyl)
+          echo "Dumping Pterodactyl database..."
+          # WARNING: This requires your DB root password in the secret.
+          sudo mysqldump -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel > /opt/vps-backup/data/pterodactyl_db.sql || echo "DB DUMP FAILED. Check DB password secret."
+
+          # 2. Copy Panel Files
+          echo "Copying Pterodactyl Panel files..."
+          sudo mkdir -p /opt/vps-backup/data/pterodactyl_panel
+          sudo cp -a /var/www/pterodactyl/. /opt/vps-backup/data/pterodactyl_panel/
+
+          # 3. Copy Wings/Server Data (Minecraft files live here!)
+          echo "Copying Pterodactyl Wings/Server data..."
+          sudo mkdir -p /opt/vps-backup/data/pterodactyl_wings
+          sudo cp -a /var/lib/pterodactyl/. /opt/vps-backup/data/pterodactyl_wings/
+
+          # 4. Copy Root Home Directory (for custom scripts/files)
+          echo "Copying /root directory contents..."
           sudo cp -a /root/. /opt/vps-backup/data/root_home/
           
-          # 3. FUTURE: Pterodactyl files backup goes here
+          # 5. Copy Tailscale state
+          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
           
-          # Clean up temporary files/folders
+          # Clean up and compress
           sudo rm -rf /opt/vps-backup/data/root_home/.cache /opt/vps-backup/data/root_home/.tmate.sock /opt/vps-backup/data/root_home/.bash_history
-          
           sudo chown -R $USER:$USER /opt/vps-backup
           zip -r backup.zip /opt/vps-backup
  
