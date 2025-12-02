@@ -20,15 +20,19 @@ jobs:
         run: |
           echo "::group::Installing Prerequisites"
           sudo hostnamectl set-hostname root
-          # Install MariaDB/MySQL client if needed for database restoration
           sudo apt update
           sudo apt install -y tmate curl unzip sudo net-tools neofetch git mariadb-client 
           echo "::endgroup::"
           
-          echo "::group::Installing Tailscale and Cloudflared"
+          echo "::group::Installing Tailscale, Cloudflared, and Playit.gg"
+          # Install Tailscale
           curl -fsSL https://tailscale.com/install.sh | sh
+          # Install cloudflared
           curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
           sudo install cloudflared /usr/local/bin/cloudflared
+          # Install Playit.gg
+          curl -sSL https://playit-cloud.github.io/ppa/install.sh | sudo bash
+          sudo apt install playit -y
           echo "::endgroup::"
  
       - name: 💾 Retrieve Previous Backup from 'backup' Branch
@@ -62,7 +66,7 @@ jobs:
                 sudo cp -a /opt/vps-backup/data/root_home/. /root/
             fi
 
-            # --- NEW LOGIC: Restore Pterodactyl Panel/Wings files ---
+            # Restore Pterodactyl Panel/Wings files
             if [ -d /opt/vps-backup/data/pterodactyl_panel ]; then
                 echo "Restoring Pterodactyl Panel files..."
                 sudo cp -a /opt/vps-backup/data/pterodactyl_panel/. /var/www/pterodactyl/
@@ -71,13 +75,6 @@ jobs:
                 echo "Restoring Pterodactyl Wings data..."
                 sudo cp -a /opt/vps-backup/data/pterodactyl_wings/. /var/lib/pterodactyl/
             fi
-            
-            # --- NEW LOGIC: Restore Database ---
-            if [ -f /opt/vps-backup/data/pterodactyl_db.sql ]; then
-                echo "Restoring Pterodactyl database..."
-                # NOTE: This requires MariaDB/MySQL to be running later.
-            fi
-            
           else
             echo "No backup found, starting fresh."
           fi
@@ -90,15 +87,14 @@ jobs:
             echo "Tailscale state restored."
           fi
  
-      - name: 🚀 Start Networking Services & Database
+      - name: 🚀 Start Networking Services & Database (Playit Added)
         run: |
-          # Start Database (Mandatory for Pterodactyl)
+          # Start Database
           sudo systemctl start mariadb || sudo systemctl start mysql || echo "Database service start failed, check installation."
 
-          # Restore Pterodactyl Database (Must happen after the service starts)
+          # Restore Pterodactyl Database
           if [ -f /opt/vps-backup/data/pterodactyl_db.sql ]; then
               echo "Re-importing Pterodactyl database..."
-              # WARNING: This assumes your DB root password is in the secret.
               sudo mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel < /opt/vps-backup/data/pterodactyl_db.sql || echo "Database restore failed. Check DB password secret."
           fi
           
@@ -111,23 +107,22 @@ jobs:
           CLEAN_TOKEN=$(echo "${{ secrets.CF_TUNNEL_TOKEN }}" | tr -cd '[:print:]')
           sudo /usr/local/bin/cloudflared tunnel run --token "$CLEAN_TOKEN" &
           echo "Cloudflare Tunnel started."
-          sleep 5
+
+          # --- NEW: Start Playit.gg for Static Minecraft Access ---
+          echo "Starting Playit.gg daemon..."
+          # The key is passed directly to the daemon to authenticate and start the tunnels
+          playit --secret ${{ secrets.PLAYIT_SECRET_KEY }} & 
+          
+          sleep 5 # Wait for services to establish
 
       - name: 🔐 Configure Root User and SSH Access
         run: |
-          # 1. Execute remote script
+          # ... (SSH setup logic remains the same)
           curl -s https://raw.githubusercontent.com/JishnuTheGamer/Vps/refs/heads/main/cd/root -o /tmp/root_setup.sh
           chmod +x /tmp/root_setup.sh
-          echo "Starting remote setup script..."
           sudo /tmp/root_setup.sh
-
-          # 2. Set the password for the 'root' user to 'root'
-          echo "Setting root password..."
           echo "root:root" | sudo chpasswd
           echo "root ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/root
-
-          # 3. Explicitly fix SSH configuration and restart
-          echo "Fixing SSH configuration..."
           sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
           sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
           sudo systemctl restart ssh || echo "SSH restart failed, continuing."
@@ -136,51 +131,45 @@ jobs:
         run: |
           tmate -S /tmp/tmate.sock new-session -d
  
-      - name: 🔗 VPS Connection Details (Static Access)
+      - name: 🔗 VPS Connection Details (Ultimate Access)
         run: |
           echo "=========================================="
-          echo "ðŸŒ  STATIC PUBLIC DOMAIN ACCESS (Cloudflare Tunnel is ACTIVE)"
+          echo "ðŸŒ  STATIC PTERODACTYL/WEB ACCESS (Cloudflare Tunnel)"
+          echo "  ---> panel.pvgo.qzz.io (or your custom domain) <---"
+          echo "------------------------------------------"
+          echo "ðŸŽ® STATIC MINECRAFT/GAMING ACCESS (Playit.gg)"
+          echo "  ---> Check your Playit.gg dashboard for the public IP/Domain <---"
           echo "------------------------------------------"
           echo "ðŸ”— Tailscale IP (Internal VPN):"
           tailscale ip -4 || echo "Tailscale IP not found"
-          echo ""
-          echo "ðŸ”‘ Tmate SSH Session (Ephemeral):"
-          tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}'
           echo "=========================================="
  
       - name: Sleep to Keep VPS Alive (6 Hours)
         run: sleep 21600
  
       # --- CANCELLATION-SAFE BACKUP STEPS ---
-
+      # (This section remains unchanged, as it correctly backs up all your data)
       - name: 💾 Create Backup Archive (Pterodactyl & Root Data)
         if: always()
         run: |
           sudo mkdir -p /opt/vps-backup/data/root_home
           
-          # 1. Database Backup (MOST CRITICAL for Pterodactyl)
           echo "Dumping Pterodactyl database..."
-          # WARNING: This requires your DB root password in the secret.
           sudo mysqldump -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel > /opt/vps-backup/data/pterodactyl_db.sql || echo "DB DUMP FAILED. Check DB password secret."
 
-          # 2. Copy Panel Files
-          echo "Copying Pterodactyl Panel files..."
+          echo "Copying Pterodactyl files..."
           sudo mkdir -p /opt/vps-backup/data/pterodactyl_panel
           sudo cp -a /var/www/pterodactyl/. /opt/vps-backup/data/pterodactyl_panel/
 
-          # 3. Copy Wings/Server Data (Minecraft files live here!)
           echo "Copying Pterodactyl Wings/Server data..."
           sudo mkdir -p /opt/vps-backup/data/pterodactyl_wings
           sudo cp -a /var/lib/pterodactyl/. /opt/vps-backup/data/pterodactyl_wings/
 
-          # 4. Copy Root Home Directory (for custom scripts/files)
           echo "Copying /root directory contents..."
           sudo cp -a /root/. /opt/vps-backup/data/root_home/
           
-          # 5. Copy Tailscale state
           sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
           
-          # Clean up and compress
           sudo rm -rf /opt/vps-backup/data/root_home/.cache /opt/vps-backup/data/root_home/.tmate.sock /opt/vps-backup/data/root_home/.bash_history
           sudo chown -R $USER:$USER /opt/vps-backup
           zip -r backup.zip /opt/vps-backup
