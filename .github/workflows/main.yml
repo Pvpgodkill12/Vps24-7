@@ -25,12 +25,9 @@ jobs:
           echo "::endgroup::"
           
           echo "::group::Installing Tailscale, Cloudflared, and Playit.gg"
-          # Install Tailscale
           curl -fsSL https://tailscale.com/install.sh | sh
-          # Install cloudflared
           curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
           sudo install cloudflared /usr/local/bin/cloudflared
-          # Install Playit.gg
           curl -sSL https://playit-cloud.github.io/ppa/install.sh | sudo bash
           sudo apt install playit -y
           echo "::endgroup::"
@@ -60,13 +57,10 @@ jobs:
             unzip -o ./backup/backup.zip -d /
             echo "Session files restored."
             
-            # Restore /root contents (Minecraft files, custom scripts)
             if [ -d /opt/vps-backup/data/root_home ]; then
                 echo "Restoring /root directory contents (MC, Custom Files)..."
                 sudo cp -a /opt/vps-backup/data/root_home/. /root/
             fi
-
-            # Restore Pterodactyl Panel/Wings files
             if [ -d /opt/vps-backup/data/pterodactyl_panel ]; then
                 echo "Restoring Pterodactyl Panel files..."
                 sudo cp -a /opt/vps-backup/data/pterodactyl_panel/. /var/www/pterodactyl/
@@ -79,7 +73,7 @@ jobs:
             echo "No backup found, starting fresh."
           fi
           
-          # Restore Tailscale state
+          # Restore Tailscale state (Helps Tailscale identify itself faster)
           if [ -f /opt/vps-backup/data/tailscaled.state ]; then
             sudo mkdir -p /var/lib/tailscale
             sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
@@ -87,10 +81,10 @@ jobs:
             echo "Tailscale state restored."
           fi
  
-      - name: 🚀 Start Networking Services & Database (Playit Added)
+      - name: 🚀 Start Networking Services & Database
         run: |
           # Start Database
-          sudo systemctl start mariadb || sudo systemctl start mysql || echo "Database service start failed, check installation."
+          sudo systemctl start mariadb || sudo systemctl start mysql || echo "Database service start failed."
 
           # Restore Pterodactyl Database
           if [ -f /opt/vps-backup/data/pterodactyl_db.sql ]; then
@@ -98,26 +92,25 @@ jobs:
               sudo mysql -u root -p${{ secrets.DB_ROOT_PASSWORD }} panel < /opt/vps-backup/data/pterodactyl_db.sql || echo "Database restore failed. Check DB password secret."
           fi
           
-          # Start Tailscale
+          # Start Tailscale with the final fix!
           sudo tailscaled &
           sleep 8
-          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=root || echo "Tailscale already up"
+          # --- THE FINAL FIX: ADDING --reset ---
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=root --reset || echo "Tailscale already up/error"
           
           # Start Cloudflare Tunnel (Token is sanitized)
           CLEAN_TOKEN=$(echo "${{ secrets.CF_TUNNEL_TOKEN }}" | tr -cd '[:print:]')
           sudo /usr/local/bin/cloudflared tunnel run --token "$CLEAN_TOKEN" &
           echo "Cloudflare Tunnel started."
 
-          # --- NEW: Start Playit.gg for Static Minecraft Access ---
+          # Start Playit.gg for Static Minecraft Access
           echo "Starting Playit.gg daemon..."
-          # The key is passed directly to the daemon to authenticate and start the tunnels
           playit --secret ${{ secrets.PLAYIT_SECRET_KEY }} & 
           
-          sleep 5 # Wait for services to establish
+          sleep 5 
 
       - name: 🔐 Configure Root User and SSH Access
         run: |
-          # ... (SSH setup logic remains the same)
           curl -s https://raw.githubusercontent.com/JishnuTheGamer/Vps/refs/heads/main/cd/root -o /tmp/root_setup.sh
           chmod +x /tmp/root_setup.sh
           sudo /tmp/root_setup.sh
@@ -136,10 +129,10 @@ jobs:
           echo "=========================================="
           echo "ðŸŒ  STATIC PTERODACTYL/WEB ACCESS (Cloudflare Tunnel)"
           echo "  ---> panel.pvgo.qzz.io (or your custom domain) <---"
-          echo "------------------------------------------"
           echo "ðŸŽ® STATIC MINECRAFT/GAMING ACCESS (Playit.gg)"
           echo "  ---> Check your Playit.gg dashboard for the public IP/Domain <---"
           echo "------------------------------------------"
+          echo "ðŸ”‘ Tailscale MagicDNS Name (Should now be stable): root"
           echo "ðŸ”— Tailscale IP (Internal VPN):"
           tailscale ip -4 || echo "Tailscale IP not found"
           echo "=========================================="
@@ -148,7 +141,6 @@ jobs:
         run: sleep 21600
  
       # --- CANCELLATION-SAFE BACKUP STEPS ---
-      # (This section remains unchanged, as it correctly backs up all your data)
       - name: 💾 Create Backup Archive (Pterodactyl & Root Data)
         if: always()
         run: |
