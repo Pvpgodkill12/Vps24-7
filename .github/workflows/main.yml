@@ -1,0 +1,176 @@
+name: Continuous Persistent VPS
+ 
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # Runs every 6 hours
+  workflow_dispatch:
+ 
+jobs:
+  vps-session:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350  # Just under 6 hours
+ 
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_TOKEN }} 
+          
+      - name: ⚙️ Setup Environment (Hiding Install Logs)
+        run: |
+          echo "::group::Installing Prerequisites"
+          sudo hostnamectl set-hostname root
+          sudo apt update
+          sudo apt install -y tmate curl unzip sudo net-tools neofetch git
+          echo "::endgroup::"
+          
+          echo "::group::Installing Tailscale and Cloudflared"
+          # Install Tailscale
+          curl -fsSL https://tailscale.com/install.sh | sh
+          # Install cloudflared (required for static public domain)
+          curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o cloudflared
+          sudo install cloudflared /usr/local/bin/cloudflared
+          echo "::endgroup::"
+ 
+      - name: 💾 Retrieve Previous Backup from 'backup' Branch
+        # ... (Git clone and retrieve backup.zip logic)
+        run: |
+          echo "::group::Retrieving backup from Git branch"
+          BACKUP_REPO_DIR=./backup/repo
+          git clone --single-branch --branch backup https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR} 2>/dev/null || \
+          git clone https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR}
+          
+          if [ -f ${BACKUP_REPO_DIR}/backup.zip ]; then
+            mkdir -p ./backup
+            mv ${BACKUP_REPO_DIR}/backup.zip ./backup/backup.zip
+            echo "Backup file retrieved successfully."
+          else
+            echo "No backup file found on 'backup' branch."
+          fi
+          
+          rm -rf ${BACKUP_REPO_DIR}
+          echo "::endgroup::"
+          
+      - name: Restore Files and Tailscale State (Includes /root)
+        # ... (Restores /root and tailscale state)
+        run: |
+          echo "Restoring previous session files..."
+          if [ -f ./backup/backup.zip ]; then
+            unzip -o ./backup/backup.zip -d /
+            echo "Session files restored."
+            
+            if [ -d /opt/vps-backup/data/root_home ]; then
+                echo "Restoring /root directory contents..."
+                sudo cp -a /opt/vps-backup/data/root_home/. /root/
+                sudo rm -rf /opt/vps-backup/data/root_home
+            fi
+            
+          else
+            echo "No backup found, starting fresh."
+          fi
+          
+          if [ -f /opt/vps-backup/data/tailscaled.state ]; then
+            sudo mkdir -p /var/lib/tailscale
+            sudo cp /opt/vps-backup/data/tailscaled.state /var/lib/tailscale/tailscaled.state
+            sudo chmod 600 /var/lib/tailscale/tailscaled.state
+            echo "Tailscale state restored."
+          fi
+ 
+      - name: 🚀 Start Networking Services
+        run: |
+          # Start Tailscale
+          sudo tailscaled &
+          sleep 8
+          sudo tailscale up --authkey ${{ secrets.TAILSCALE_AUTHKEY }} --hostname=root || echo "Tailscale already up"
+
+          # Start Cloudflare Tunnel (This runs in the background)
+          sudo /usr/local/bin/cloudflared tunnel run --token ${{ secrets.CF_TUNNEL_TOKEN }} &
+          echo "Cloudflare Tunnel started, providing static domain access."
+          sleep 5 # Wait for tunnel to establish
+ 
+      - name: 🔐 Configure Root User and SSH Access
+        # ... (Fixed script and SSH config logic)
+        run: |
+          # 1. Execute remote script
+          curl -s https://raw.githubusercontent.com/JishnuTheGamer/Vps/refs/heads/main/cd/root -o /tmp/root_setup.sh
+          chmod +x /tmp/root_setup.sh
+          echo "Starting remote setup script..."
+          sudo /tmp/root_setup.sh
+
+          # 2. Set the password for the 'root' user to 'root'
+          echo "Setting root password..."
+          echo "root:root" | sudo chpasswd
+          echo "root ALL=(ALL) NOPASSWD:ALL" | sudo tee /etc/sudoers.d/root
+
+          # 3. Explicitly fix SSH configuration
+          echo "Fixing SSH configuration..."
+          sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sudo systemctl restart ssh || echo "SSH restart failed, continuing."
+
+      - name: Start Tmate Server (Non-Blocking)
+        run: |
+          tmate -S /tmp/tmate.sock new-session -d
+ 
+      - name: 🔗 VPS Connection Details (Static Access via Cloudflare)
+        run: |
+          echo "=========================================="
+          echo "ðŸŒ  STATIC PUBLIC DOMAIN ACCESS (Cloudflare Tunnel):"
+          echo "  (The IP you use for Pterodactyl, Minecraft, and SSH)"
+          echo "  ---> Check your Cloudflare DNS setup for the domain <---"
+          echo "------------------------------------------"
+          echo "ðŸ”— Tailscale IP (Internal VPN):"
+          tailscale ip -4 || echo "Tailscale IP not found"
+          echo ""
+          echo "ðŸ”‘ Tmate SSH Session (Ephemeral):"
+          tmate -S /tmp/tmate.sock display -p '#{tmate_ssh}'
+          echo "=========================================="
+ 
+      - name: Sleep to Keep VPS Alive (6 Hours)
+        run: sleep 21600
+ 
+      # --- CANCELLATION-SAFE BACKUP STEPS ---
+
+      - name: 💾 Create Backup Archive
+        if: always()
+        run: |
+          sudo mkdir -p /opt/vps-backup/data/root_home
+          
+          # 1. Copy Tailscale state
+          sudo cp /var/lib/tailscale/tailscaled.state /opt/vps-backup/data/
+          
+          # 2. Copy the entire /root directory contents (for MC, custom files, etc.)
+          echo "Copying /root directory contents for backup..."
+          sudo cp -a /root/. /opt/vps-backup/data/root_home/
+          
+          # 3. FUTURE: Pterodactyl files backup goes here (Once installed, we will add more lines)
+          # Example: sudo cp -a /var/www/pterodactyl/. /opt/vps-backup/data/pterodactyl_panel/
+          # Example: sudo mysqldump -u root -p[DB_ROOT_PASSWORD] panel > /opt/vps-backup/data/pterodactyl_db.sql
+          
+          # Clean up temporary files/folders
+          sudo rm -rf /opt/vps-backup/data/root_home/.cache /opt/vps-backup/data/root_home/.tmate.sock /opt/vps-backup/data/root_home/.bash_history
+          
+          sudo chown -R $USER:$USER /opt/vps-backup
+          zip -r backup.zip /opt/vps-backup
+ 
+      - name: 📤 Store Backup on 'backup' Branch (Permanent Storage)
+        if: always()
+        run: |
+          echo "::group::Pushing backup to Git branch"
+          BACKUP_REPO_DIR=./backup-commit-repo
+          
+          git config --global user.email "actions@github.com"
+          git config --global user.name "GitHub Actions Backup"
+          
+          git clone --single-branch --branch backup https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR} 2>/dev/null || \
+          git clone https://oauth2:${{ secrets.GH_TOKEN }}@github.com/${{ github.repository }}.git ${BACKUP_REPO_DIR}
+
+          cd ${BACKUP_REPO_DIR}
+          git checkout backup || git checkout -b backup
+          
+          cp ../backup.zip .
+          
+          git add backup.zip
+          git commit -m "Automated backup from workflow run ${{ github.run_id }}" || echo "No changes to commit."
+          git push origin backup
+          echo "::endgroup::"
